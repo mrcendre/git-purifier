@@ -1,0 +1,197 @@
+#!/bin/bash
+
+#
+# `git-purifier`
+#
+#  An opinionated script to rewrite parts of a Git repository's history. 
+#
+#  Remember, with great power comes great responsibility. You'll be prompted for confirmation anyways ;)
+#
+#
+#  Usage:
+#
+#  git-purifier [author | committer] <author_name> <author_email>
+#  git-purifier [messages] <author_email>
+#
+#  author : Rewrites the author information in all commits from the history.
+#  committer : Rewrites the committer information in all commits from the history.
+#  messages : Starts interactively rewriting all commit messages whose author has the given email.
+#
+
+# set -xe  # To debug commands
+set -e
+
+show_usage() {
+	printf "\e[38;5;250m%s\e[0m\n\n" "Woops! Something's not right, check the script for guidance. Usage:"
+	printf "\t%s\n\n" "git-purifier [author | committer] <author_name> <author_email>"
+	printf "\t%s\t\t\t%s\n" "author" "Rewrites the author information in all commits from the history."
+	printf "\t%s\t\t%s\n" "committer" "Rewrites the committer information in all commits from the history."
+	printf "\t%s\t\t%s\n" "messages" "Starts interactively rewriting all commit messages whose author has the given email."
+	exit 1
+}
+
+# Parse arguments
+ACTION=""
+if [[ $# -lt 1 ]]; then
+	show_usage
+fi
+
+ACTION="$1"
+
+# Check if an action was specified, otherwise show usage
+if [[ -z "$ACTION" ]]; then
+	show_usage
+fi
+
+# Check that git filter-repo is installed
+if ! command -v git-filter-repo &> /dev/null; then
+	echo "git-filter-repo could not be found, please install it first."
+	echo "brew install git-filter-repo"
+	exit 1
+fi
+
+rewrite_author_info() {
+	local name="$1"
+	local email="$2"
+
+	prompt_confirmation "All existing author information will be replaced with: $name ($email).
+This is irreversible — please make sure you have a backup if the repository is important."
+
+	# Retrieve the remote
+	remote_url=$(git remote get-url origin)
+
+	start_timer "Rewriting author information.."
+
+	git filter-repo --commit-callback '
+commit.author_name = b"'"$name"'"
+commit.author_email = b"'"$email"'"
+' --force &> /dev/null
+
+	stop_timer
+
+	# Set the remote back
+	git remote add origin "$remote_url"
+	
+	# Fetch the remote's refs to be able to force push later
+	git fetch
+}
+
+rewrite_committer_info() {
+	local name="$1"
+	local email="$2"
+
+	prompt_confirmation "All existing committer information will be replaced with: $name ($email).
+This is irreversible — please make sure you have a backup if the repository is important."
+
+	# Retrieve the remote
+	remote_url=$(git remote get-url origin)
+
+	start_timer "Rewriting committer information..."
+
+	# Perform the operation
+	git filter-repo --commit-callback '
+commit.committer_name = b"'"$name"'"
+commit.committer_email = b"'"$email"'"
+' --force &> /dev/null
+
+	stop_timer
+
+	# Set the remote back
+	git remote add origin "$remote_url"
+	
+	# Fetch the remote's refs to be able to force push later
+	git fetch
+
+}
+
+# Interactively rewrite commit messages
+rewrite_commit_messages() {
+
+	echo "Starting interactive commit message rewriting for commits authored by $1"
+
+	# TODO
+
+}
+
+# Prints a standard confirmation prompt
+prompt_confirmation() {
+
+	# Print the confirmation prompt.
+	# "Warning!" in bold red
+	# $1 as message
+	# Then "Would you like to continue ? (yes/no)"
+
+	printf "\e[1;31m%s\e[0m\n" "Warning!"
+
+	printf "$1\n"
+
+	read -p "Would you like to continue ? (yes/no): " confirm
+
+	# Match both y and yes
+	if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
+		echo "Operation cancelled."
+		exit 1
+	fi
+
+}
+
+# Start the timer in the background; optional message
+start_timer() {
+  TIMER_MSG="${1:-Working}"
+  TIMER_STARTED_EPOCH=$(date +%s)
+  tput civis 2>/dev/null || true
+
+  (
+    # Exit cleanly when asked to stop
+    trap 'exit 0' TERM INT
+    local ticks=1
+    while :; do
+      printf "\r\033[2K\033[38;5;245m→ %s (%d sec)\033[0m" "$TIMER_MSG" "$ticks" 1>&2
+      sleep 1
+      ticks=$((ticks + 1))
+    done
+  ) &
+  TIMER_PID=$!
+
+  # Restore cursor even if script exits unexpectedly
+  trap 'stop_timer' EXIT
+}
+
+# Stop the timer
+stop_timer() {
+  [[ -n "$TIMER_PID" ]] || return 0
+
+  # Ask the loop to exit
+  kill -TERM "$TIMER_PID" 2>/dev/null || true
+
+  # Give it a moment to die; then force-kill if needed
+  for _ in 1 2 3 4 5; do
+    kill -0 "$TIMER_PID" 2>/dev/null || break
+    sleep 0.02
+  done
+  kill -KILL "$TIMER_PID" 2>/dev/null || true
+
+  # Reap it
+  wait "$TIMER_PID" 2>/dev/null || true
+  TIMER_PID=
+
+  # Print final line with total time in (0.00 sec)
+  local end_time=$(date +%s)
+  local total=$(( end_time - TIMER_STARTED_EPOCH ))
+  local seconds=$(( total % 60 ))
+  local millis=$(( (total * 10) % 10 ))
+
+  printf "\r\033[2K\033[38;5;245m✔ %s (%d sec.)\033[0m\n" "${TIMER_MSG:-Done}" "$seconds" 1>&2
+
+  tput cnorm 2>/dev/null || true
+  trap - EXIT
+}
+
+
+case "$ACTION" in
+author) rewrite_author_info "$2" "$3" ;;
+committer) rewrite_committer_info "$2" "$3" ;;
+messages) rewrite_commit_messages "$@" ;;
+*) show_usage ;;
+esac
+
